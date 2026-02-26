@@ -71,13 +71,7 @@ resource "aws_iam_policy" "github_actions" {
         Sid = "CodeDeployManagement"
         Effect = "Allow"
         Action = [
-          "codedeploy:GetApplication",
-          "codedeploy:GetDeploymentGroup",
-          "codedeploy:CreateDeployment",
-          "codedeploy:GetDeployment",
-          "codedeploy:GetDeploymentConfig",
-          "codedeploy:ListDeployments",
-          "codedeploy:StopDeployment"
+          "codedeploy:*"
         ]
         Resource = "*"
       },
