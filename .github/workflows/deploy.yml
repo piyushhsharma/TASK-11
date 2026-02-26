@@ -28,7 +28,6 @@ env:
 concurrency:
   group: deployment
   cancel-in-progress: false
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
