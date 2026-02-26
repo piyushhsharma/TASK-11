@@ -21,9 +21,12 @@ resource "aws_codedeploy_deployment_group" "main" {
   }
 
   blue_green_deployment_config {
-    terminate_blue_instances_on_deployment_success = true
     deployment_ready_option {
       action_on_timeout = "CONTINUE_DEPLOYMENT"
+    }
+    
+    terminate_blue_instances_on_deployment_success {
+      action = "TERMINATE"
     }
   }
 
@@ -40,10 +43,6 @@ resource "aws_codedeploy_deployment_group" "main" {
   ecs_service {
     cluster_name = aws_ecs_cluster.main.name
     service_name = aws_ecs_service.main.name
-  }
-
-  deployment_selector {
-    target_type = "INSTANCE"
   }
 
   load_balancer_info {

@@ -1,0 +1,20 @@
+# Terraform Variables Configuration
+# Copy this file to terraform.tfvars and update with your values
+
+# Required Variables
+github_owner = "piyushhsharma"
+github_repo  = "TASK-11"
+
+# Optional Variables (uncomment to override defaults)
+aws_region        = "ap-south-1"
+project_name      = "myapp"
+environment       = "production"
+container_port    = 3000
+container_cpu     = 256
+container_memory  = 512
+desired_count     = 1
+
+# Optional: Use existing VPC (uncomment and provide values)
+# existing_vpc_id              = "vpc-xxxxxxxxx"
+# existing_private_subnet_ids = ["subnet-xxxxxxxxx", "subnet-yyyyyyyyy"]
+# existing_public_subnet_ids  = ["subnet-aaaaaaa", "subnet-bbbbbbb"]
