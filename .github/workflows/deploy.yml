@@ -1,0 +1,224 @@
+name: Deploy to ECS Fargate with Blue/Green Deployment
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+  CODEDEPLOY_APPLICATION: ${{ secrets.CODEDEPLOY_APPLICATION }}
+  CODEDEPLOY_DEPLOYMENT_GROUP: ${{ secrets.CODEDEPLOY_DEPLOYMENT_GROUP }}
+  CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
+  CONTAINER_PORT: 3000
+
+# Prevent concurrent deployments
+concurrency:
+  group: deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+        continue-on-error: false
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        run: |
+          echo "Logging in to ECR..."
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Build Docker image
+        id: build-image
+        run: |
+          echo "Building Docker image..."
+          docker build -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Push Docker image to ECR
+        id: push-image
+        run: |
+          echo "Pushing Docker image to ECR..."
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          echo "image=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Get current ECS task definition
+        id: current-task-def
+        run: |
+          echo "Fetching current task definition..."
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_SERVICE }} \
+            --query 'taskDefinition' \
+            --output json)
+          
+          # Clean up the task definition for registration
+          CLEANED_TASK_DEF=$(echo $TASK_DEF | jq 'del(.revision, .status, .taskDefinitionArn, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          
+          echo "task-definition=$CLEANED_TASK_DEF" >> $GITHUB_OUTPUT
+
+      - name: Update task definition with new image
+        id: new-task-def
+        run: |
+          echo "Updating task definition with new image..."
+          NEW_TASK_DEF=$(echo '${{ steps.current-task-def.outputs.task-definition }}' | \
+            jq --arg image "${{ steps.push-image.outputs.image }}" \
+            '.containerDefinitions[0].image = $image')
+          
+          echo "updated-task-definition=$NEW_TASK_DEF" >> $GITHUB_OUTPUT
+
+      - name: Register new task definition
+        id: register-task-def
+        run: |
+          echo "Registering new task definition..."
+          REGISTERED_TASK_DEF=$(aws ecs register-task-definition \
+            --cli-input-json '${{ steps.new-task-def.outputs.updated-task-definition }}' \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          echo "task-definition-arn=$REGISTERED_TASK_DEF" >> $GITHUB_OUTPUT
+          echo "New task definition ARN: $REGISTERED_TASK_DEF"
+
+      - name: Create AppSpec file
+        id: create-appspec
+        run: |
+          echo "Creating AppSpec file..."
+          cat > appspec.json << EOF
+          {
+            "version": 1,
+            "Resources": [
+              {
+                "TargetService": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "TaskDefinition": "${{ steps.register-task-def.outputs.task-definition-arn }}",
+                    "LoadBalancerInfo": {
+                      "ContainerName": "${{ env.CONTAINER_NAME }}",
+                      "ContainerPort": ${{ env.CONTAINER_PORT }}
+                    }
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+          
+          echo "AppSpec file created:"
+          cat appspec.json
+
+      - name: Create CodeDeploy deployment
+        id: create-deployment
+        run: |
+          echo "Creating CodeDeploy deployment..."
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name ${{ env.CODEDEPLOY_APPLICATION }} \
+            --deployment-group-name ${{ env.CODEDEPLOY_DEPLOYMENT_GROUP }} \
+            --revision file://appspec.json \
+            --description "Deployment from GitHub Actions - Commit ${{ github.sha }}" \
+            --query 'deploymentId' \
+            --output text)
+          
+          echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          echo "Deployment created with ID: $DEPLOYMENT_ID"
+
+      - name: Monitor deployment status
+        id: monitor-deployment
+        run: |
+          echo "Monitoring deployment status..."
+          DEPLOYMENT_ID="${{ steps.create-deployment.outputs.deployment-id }}"
+          TIMEOUT=900  # 15 minutes
+          INTERVAL=30   # 30 seconds
+          ELAPSED=0
+          
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(aws deploy get-deployment \
+              --deployment-id $DEPLOYMENT_ID \
+              --query 'deploymentInfo.status' \
+              --output text)
+            
+            echo "Current deployment status: $STATUS (elapsed: ${ELAPSED}s)"
+            
+            case $STATUS in
+              "Succeeded")
+                echo "✅ Deployment succeeded!"
+                echo "deployment-status=$STATUS" >> $GITHUB_OUTPUT
+                exit 0
+                ;;
+              "Failed")
+                echo "❌ Deployment failed!"
+                echo "deployment-status=$STATUS" >> $GITHUB_OUTPUT
+                ERROR_INFO=$(aws deploy get-deployment \
+                  --deployment-id $DEPLOYMENT_ID \
+                  --query 'deploymentInfo.errorInformation' \
+                  --output json)
+                echo "Error details: $ERROR_INFO"
+                exit 1
+                ;;
+              "Stopped")
+                echo "⏹️ Deployment was stopped!"
+                echo "deployment-status=$STATUS" >> $GITHUB_OUTPUT
+                exit 1
+                ;;
+              "InProgress")
+                echo "⏳ Deployment in progress..."
+                ;;
+              *)
+                echo "❓ Unknown status: $STATUS"
+                ;;
+            esac
+            
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          echo "⏰ Deployment monitoring timed out after $TIMEOUT seconds"
+          echo "deployment-status=TimedOut" >> $GITHUB_OUTPUT
+          exit 1
+
+      - name: Send Slack notification on success
+        if: success()
+        run: |
+          echo "Sending success notification to Slack..."
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"✅ ECS Deployment Successful\n\n📦 Repository: ${{ github.repository }}\n🔀 Branch: ${{ github.ref_name }}\n🏷️ Commit: ${{ github.sha }}\n🚀 Service: ${{ env.ECS_SERVICE }}\n📊 Deployment ID: ${{ steps.create-deployment.outputs.deployment-id }}"}' \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Send Slack notification on failure
+        if: failure()
+        run: |
+          echo "Sending failure notification to Slack..."
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"❌ ECS Deployment Failed\n\n📦 Repository: ${{ github.repository }}\n🔀 Branch: ${{ github.ref_name }}\n🏷️ Commit: ${{ github.sha }}\n🚀 Service: ${{ env.ECS_SERVICE }}\n📊 Deployment ID: ${{ steps.create-deployment.outputs.deployment-id }}\n🔗 Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up temporary files..."
+          rm -f appspec.json
+          docker system prune -f
