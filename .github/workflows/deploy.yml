@@ -126,10 +126,63 @@ jobs:
         id: current-task-def
         run: |
           echo "Fetching current task definition..."
+          
+          # Try to get existing task definition
           TASK_DEF=$(aws ecs describe-task-definition \
             --task-definition ${{ env.ECS_SERVICE }} \
             --query 'taskDefinition' \
-            --output json)
+            --output json 2>/dev/null || echo "")
+          
+          if [ -z "$TASK_DEF" ]; then
+            echo "No existing task definition found. Creating initial task definition..."
+            
+            # Create initial task definition
+            TASK_DEF='{
+              "family": "${{ env.ECS_SERVICE }}",
+              "networkMode": "awsvpc",
+              "requiresCompatibilities": ["FARGATE"],
+              "cpu": "256",
+              "memory": "512",
+              "executionRoleArn": "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/myapp-ecs-task-execution-role",
+              "taskRoleArn": "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/myapp-ecs-task-role",
+              "containerDefinitions": [
+                {
+                  "name": "${{ env.CONTAINER_NAME }}",
+                  "image": "${{ steps.push-image.outputs.image }}",
+                  "portMappings": [
+                    {
+                      "containerPort": ${{ env.CONTAINER_PORT }},
+                      "protocol": "tcp"
+                    }
+                  ],
+                  "essential": true,
+                  "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                      "awslogs-group": "/aws/ecs/${{ env.ECS_SERVICE }}",
+                      "awslogs-region": "${{ env.AWS_REGION }}",
+                      "awslogs-stream-prefix": "ecs"
+                    }
+                  },
+                  "environment": [
+                    {
+                      "name": "NODE_ENV",
+                      "value": "production"
+                    }
+                  ],
+                  "healthCheck": {
+                    "command": ["CMD-SHELL", "curl -f http://localhost:${{ env.CONTAINER_PORT }}/health || exit 1"],
+                    "interval": 30,
+                    "timeout": 5,
+                    "retries": 3,
+                    "startPeriod": 60
+                  }
+                }
+              ]
+            }'
+          else
+            echo "Found existing task definition"
+          fi
           
           # Clean up the task definition for registration
           CLEANED_TASK_DEF=$(echo $TASK_DEF | jq 'del(.revision, .status, .taskDefinitionArn, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
@@ -140,9 +193,18 @@ jobs:
         id: new-task-def
         run: |
           echo "Updating task definition with new image..."
-          NEW_TASK_DEF=$(echo '${{ steps.current-task-def.outputs.task-definition }}' | \
-            jq --arg image "${{ steps.push-image.outputs.image }}" \
-            '.containerDefinitions[0].image = $image')
+          
+          # Check if this is a new task definition or existing one
+          CURRENT_TASK_DEF='${{ steps.current-task-def.outputs.task-definition }}'
+          
+          if [[ "$CURRENT_TASK_DEF" == *"${{ steps.push-image.outputs.image }}"* ]]; then
+            echo "Task definition already has the correct image"
+            NEW_TASK_DEF="$CURRENT_TASK_DEF"
+          else
+            NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | \
+              jq --arg image "${{ steps.push-image.outputs.image }}" \
+              '.containerDefinitions[0].image = $image')
+          fi
           
           echo "updated-task-definition=$NEW_TASK_DEF" >> $GITHUB_OUTPUT
 
