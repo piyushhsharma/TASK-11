@@ -75,12 +75,14 @@ resource "aws_iam_policy" "github_actions" {
           "codedeploy:GetDeploymentGroup",
           "codedeploy:CreateDeployment",
           "codedeploy:GetDeployment",
+          "codedeploy:GetDeploymentConfig",
           "codedeploy:ListDeployments",
           "codedeploy:StopDeployment"
         ]
         Resource = [
           aws_codedeploy_app.main.arn,
-          aws_codedeploy_deployment_group.main.arn
+          aws_codedeploy_deployment_group.main.arn,
+          "arn:aws:codedeploy:${var.aws_region}:${data.aws_caller_identity.current.account_id}:deployment-config:CodeDeployDefault.ECSAllAtOnce"
         ]
       },
       {
