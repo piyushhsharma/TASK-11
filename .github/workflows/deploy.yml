@@ -254,7 +254,7 @@ jobs:
           DEPLOYMENT_ID=$(aws deploy create-deployment \
             --application-name ${{ env.CODEDEPLOY_APPLICATION }} \
             --deployment-group-name ${{ env.CODEDEPLOY_DEPLOYMENT_GROUP }} \
-            --revision file://appspec.json \
+            --revision revisionType=AppSpecContent,appSpecContent="{content=$(cat appspec.json | base64 -w 0)}" \
             --description "Deployment from GitHub Actions - Commit ${{ github.sha }}" \
             --query 'deploymentId' \
             --output text)
