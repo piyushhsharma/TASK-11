@@ -22,6 +22,7 @@ env:
   CODEDEPLOY_DEPLOYMENT_GROUP: ${{ secrets.CODEDEPLOY_DEPLOYMENT_GROUP }}
   CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
   CONTAINER_PORT: 3000
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
 # Prevent concurrent deployments
 concurrency:
@@ -53,11 +54,67 @@ jobs:
           echo "Logging in to ECR..."
           aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
+      - name: Debug repository structure
+        run: |
+          echo "=== Repository Structure ==="
+          find . -type f -name "Dockerfile*" | head -20
+          echo ""
+          echo "=== Directory Listing ==="
+          ls -la
+          echo ""
+          echo "=== Backend Directory Check ==="
+          if [ -d "backend" ]; then
+            echo "Backend directory found:"
+            ls -la backend/
+          else
+            echo "No backend directory found"
+          fi
+
+      - name: Detect Dockerfile location
+        id: detect-dockerfile
+        run: |
+          DOCKERFILE_PATH=""
+          BUILD_CONTEXT="."
+          
+          # Check for Dockerfile in common locations
+          if [ -f "Dockerfile" ]; then
+            DOCKERFILE_PATH="Dockerfile"
+            BUILD_CONTEXT="."
+          elif [ -f "backend/Dockerfile" ]; then
+            DOCKERFILE_PATH="backend/Dockerfile"
+            BUILD_CONTEXT="backend"
+          elif [ -f "app/Dockerfile" ]; then
+            DOCKERFILE_PATH="app/Dockerfile"
+            BUILD_CONTEXT="app"
+          elif [ -f "src/Dockerfile" ]; then
+            DOCKERFILE_PATH="src/Dockerfile"
+            BUILD_CONTEXT="src"
+          else
+            echo "❌ ERROR: No Dockerfile found in repository!"
+            echo "Please add a Dockerfile to one of these locations:"
+            echo "  - ./Dockerfile"
+            echo "  - ./backend/Dockerfile"
+            echo "  - ./app/Dockerfile"
+            echo "  - ./src/Dockerfile"
+            exit 1
+          fi
+          
+          echo "✅ Found Dockerfile at: $DOCKERFILE_PATH"
+          echo "📁 Build context: $BUILD_CONTEXT"
+          echo "dockerfile-path=$DOCKERFILE_PATH" >> $GITHUB_OUTPUT
+          echo "build-context=$BUILD_CONTEXT" >> $GITHUB_OUTPUT
+
       - name: Build Docker image
         id: build-image
         run: |
+          DOCKERFILE_PATH="${{ steps.detect-dockerfile.outputs.dockerfile-path }}"
+          BUILD_CONTEXT="${{ steps.detect-dockerfile.outputs.build-context }}"
+          
           echo "Building Docker image..."
-          docker build -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
+          echo "Dockerfile: $DOCKERFILE_PATH"
+          echo "Context: $BUILD_CONTEXT"
+          
+          docker build -f $DOCKERFILE_PATH -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} $BUILD_CONTEXT
           docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
 
       - name: Push Docker image to ECR
@@ -200,7 +257,7 @@ jobs:
           exit 1
 
       - name: Send Slack notification on success
-        if: success()
+        if: success() && env.SLACK_WEBHOOK_URL != ''
         run: |
           echo "Sending success notification to Slack..."
           curl -X POST -H 'Content-type: application/json' \
@@ -208,7 +265,7 @@ jobs:
             ${{ secrets.SLACK_WEBHOOK_URL }}
 
       - name: Send Slack notification on failure
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
         run: |
           echo "Sending failure notification to Slack..."
           curl -X POST -H 'Content-type: application/json' \
