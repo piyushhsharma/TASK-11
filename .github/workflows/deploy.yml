@@ -187,33 +187,33 @@ jobs:
           # Clean up the task definition for registration
           CLEANED_TASK_DEF=$(echo $TASK_DEF | jq 'del(.revision, .status, .taskDefinitionArn, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
           
-          echo "task-definition=$CLEANED_TASK_DEF" >> $GITHUB_OUTPUT
+          # Save task definition to file instead of GitHub output
+          echo "$CLEANED_TASK_DEF" > task-def.json
+          echo "Task definition saved to task-def.json"
 
       - name: Update task definition with new image
         id: new-task-def
         run: |
           echo "Updating task definition with new image..."
           
-          # Check if this is a new task definition or existing one
-          CURRENT_TASK_DEF='${{ steps.current-task-def.outputs.task-definition }}'
+          # Read task definition from file
+          CURRENT_TASK_DEF=$(cat task-def.json)
           
-          if [[ "$CURRENT_TASK_DEF" == *"${{ steps.push-image.outputs.image }}"* ]]; then
-            echo "Task definition already has the correct image"
-            NEW_TASK_DEF="$CURRENT_TASK_DEF"
-          else
-            NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | \
-              jq --arg image "${{ steps.push-image.outputs.image }}" \
-              '.containerDefinitions[0].image = $image')
-          fi
+          # Update the image in the task definition
+          NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | \
+            jq --arg image "${{ steps.push-image.outputs.image }}" \
+            '.containerDefinitions[0].image = $image')
           
-          echo "updated-task-definition=$NEW_TASK_DEF" >> $GITHUB_OUTPUT
+          # Save updated task definition to file
+          echo "$NEW_TASK_DEF" > task-def-updated.json
+          echo "Updated task definition saved to task-def-updated.json"
 
       - name: Register new task definition
         id: register-task-def
         run: |
           echo "Registering new task definition..."
           REGISTERED_TASK_DEF=$(aws ecs register-task-definition \
-            --cli-input-json '${{ steps.new-task-def.outputs.updated-task-definition }}' \
+            --cli-input-json file://task-def-updated.json \
             --query 'taskDefinition.taskDefinitionArn' \
             --output text)
           
@@ -336,5 +336,5 @@ jobs:
         if: always()
         run: |
           echo "Cleaning up temporary files..."
-          rm -f appspec.json
+          rm -f appspec.json task-def.json task-def-updated.json
           docker system prune -f
