@@ -79,11 +79,7 @@ resource "aws_iam_policy" "github_actions" {
           "codedeploy:ListDeployments",
           "codedeploy:StopDeployment"
         ]
-        Resource = [
-          aws_codedeploy_app.main.arn,
-          aws_codedeploy_deployment_group.main.arn,
-          "arn:aws:codedeploy:${var.aws_region}:${data.aws_caller_identity.current.account_id}:deployment-config:CodeDeployDefault.ECSAllAtOnce"
-        ]
+        Resource = "*"
       },
       {
         Sid = "LoadBalancerAccess"
